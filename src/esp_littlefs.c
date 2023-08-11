@@ -80,14 +80,15 @@ typedef struct {
     char *path;         /*!< Requested directory name */
 } vfs_littlefs_dir_t;
 
-static int     vfs_littlefs_open(void* ctx, const char * path, int flags, int mode);
-static ssize_t vfs_littlefs_write(void* ctx, int fd, const void * data, size_t size);
-static ssize_t vfs_littlefs_read(void* ctx, int fd, void * dst, size_t size);
-static ssize_t vfs_littlefs_pwrite(void *ctx, int fd, const void *src, size_t size, off_t offset);
-static ssize_t vfs_littlefs_pread(void *ctx, int fd, void *dst, size_t size, off_t offset);
-static int     vfs_littlefs_close(void* ctx, int fd);
-static off_t   vfs_littlefs_lseek(void* ctx, int fd, off_t offset, int mode);
-static int     vfs_littlefs_fsync(void* ctx, int fd);
+static int       vfs_littlefs_open(void* ctx, const char * path, int flags, int mode);
+static ssize_t   vfs_littlefs_write(void* ctx, int fd, const void * data, size_t size);
+static ssize_t   vfs_littlefs_read(void* ctx, int fd, void * dst, size_t size);
+static ssize_t   vfs_littlefs_pwrite(void *ctx, int fd, const void *src, size_t size, off_t offset);
+static ssize_t   vfs_littlefs_pread(void *ctx, int fd, void *dst, size_t size, off_t offset);
+static int       vfs_littlefs_close(void* ctx, int fd);
+static off_t     vfs_littlefs_lseek(void* ctx, int fd, off_t offset, int mode);
+static int       vfs_littlefs_fsync(void* ctx, int fd);
+static esp_vfs_t vfs_littlefs_create_struct(void);
 
 #ifdef CONFIG_VFS_SUPPORT_DIR
 static int     vfs_littlefs_stat(void* ctx, const char * path, struct stat * st);
@@ -111,8 +112,14 @@ static int vfs_littlefs_ftruncate(void *ctx, int fd, off_t size);
 static void      esp_littlefs_dir_free(vfs_littlefs_dir_t *dir);
 #endif
 
+static void      esp_littlefs_take_efs_lock(void);
+static esp_err_t esp_littlefs_init_efs(esp_littlefs_t** efs, const esp_partition_t* partition);
+static esp_err_t esp_littlefs_init_partition(const esp_vfs_littlefs_conf_partition_t* conf);
 static esp_err_t esp_littlefs_init(const esp_vfs_littlefs_conf_t* conf);
+
 static esp_err_t esp_littlefs_by_label(const char* label, int * index);
+static esp_err_t esp_littlefs_by_partition(const esp_partition_t* part, int*index);
+
 static esp_err_t esp_littlefs_get_empty(int *index);
 static void      esp_littlefs_free(esp_littlefs_t ** efs);
 static int       esp_littlefs_flags_conv(int m);
@@ -203,6 +210,14 @@ bool esp_littlefs_mounted(const char* partition_label) {
     return _efs[index]->cache_size > 0;
 }
 
+bool esp_littlefs_partition_mounted(const esp_partition_t* partition) {
+    int index;
+    esp_err_t err = esp_littlefs_by_partition(partition, &index);
+
+    if(err != ESP_OK) return false;
+    return _efs[index]->cache_size > 0;
+}
+
 esp_err_t esp_littlefs_info(const char* partition_label, size_t *total_bytes, size_t *used_bytes){
     int index;
     esp_err_t err;
@@ -225,46 +240,63 @@ esp_err_t esp_littlefs_info(const char* partition_label, size_t *total_bytes, si
     return ESP_OK;
 }
 
+esp_err_t esp_littlefs_parition_info(const esp_partition_t* partition, size_t *total_bytes, size_t *used_bytes){
+    int index;
+    esp_err_t err;
+    esp_littlefs_t *efs = NULL;
+
+    err = esp_littlefs_by_partition(partition, &index);
+    if(err != ESP_OK) return err;
+    efs = _efs[index];
+
+    size_t total_bytes_local = efs->cfg.block_size * efs->cfg.block_count;
+    if(total_bytes) *total_bytes = total_bytes_local;
+
+    /* lfs_fs_size may return a size larger than the actual filesystem size.
+     * https://github.com/littlefs-project/littlefs/blob/9c7e232086f865cff0bb96fe753deb66431d91fd/lfs.h#L658
+     */
+    sem_take(efs);
+    if(used_bytes) *used_bytes = MIN(total_bytes_local, efs->cfg.block_size * lfs_fs_size(efs->fs));
+    sem_give(efs);
+
+    return ESP_OK;
+}
+
+
+esp_err_t esp_vfs_littlefs_register_partition(const esp_vfs_littlefs_conf_partition_t * conf)
+{
+    assert(conf->base_path);
+    const esp_vfs_t vfs = vfs_littlefs_create_struct();
+
+    esp_err_t err = esp_littlefs_init_partition(conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Failed to initialize LittleFS");
+        return err;
+    }
+
+    int index;
+    if (esp_littlefs_by_partition(conf->partition, &index) != ESP_OK) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Unable to find partition \"0x%08"PRIX32"\"", conf->partition->address);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    strlcat(_efs[index]->base_path, conf->base_path, ESP_VFS_PATH_MAX + 1);
+    err = esp_vfs_register(conf->base_path, &vfs, _efs[index]);
+    if (err != ESP_OK) {
+        esp_littlefs_free(&_efs[index]);
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Failed to register Littlefs to \"%s\"", conf->base_path);
+        return err;
+    }
+
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Successfully registered LittleFS to \"%s\"", conf->base_path);
+    return ESP_OK;
+}
+
+
 esp_err_t esp_vfs_littlefs_register(const esp_vfs_littlefs_conf_t * conf)
 {
     assert(conf->base_path);
-    const esp_vfs_t vfs = {
-        .flags       = ESP_VFS_FLAG_CONTEXT_PTR,
-        .write_p     = &vfs_littlefs_write,
-        .pwrite_p    = &vfs_littlefs_pwrite,
-        .lseek_p     = &vfs_littlefs_lseek,
-        .read_p      = &vfs_littlefs_read,
-        .pread_p     = &vfs_littlefs_pread,
-        .open_p      = &vfs_littlefs_open,
-        .close_p     = &vfs_littlefs_close,
-        .fsync_p     = &vfs_littlefs_fsync,
-        .fcntl_p     = &vfs_littlefs_fcntl,
-#ifndef CONFIG_LITTLEFS_USE_ONLY_HASH
-        .fstat_p     = &vfs_littlefs_fstat,
-#endif
-#ifdef CONFIG_VFS_SUPPORT_DIR
-        .stat_p      = &vfs_littlefs_stat,
-        .link_p      = NULL, /* Not Supported */
-        .unlink_p    = &vfs_littlefs_unlink,
-        .rename_p    = &vfs_littlefs_rename,
-        .opendir_p   = &vfs_littlefs_opendir,
-        .readdir_p   = &vfs_littlefs_readdir,
-        .readdir_r_p = &vfs_littlefs_readdir_r,
-        .telldir_p   = &vfs_littlefs_telldir,
-        .seekdir_p   = &vfs_littlefs_seekdir,
-        .closedir_p  = &vfs_littlefs_closedir,
-        .mkdir_p     = &vfs_littlefs_mkdir,
-        .rmdir_p     = &vfs_littlefs_rmdir,
-        // access_p
-		.truncate_p  = &vfs_littlefs_truncate,
-#ifdef ESP_LITTLEFS_ENABLE_FTRUNCATE
-        .ftruncate_p = &vfs_littlefs_ftruncate,
-#endif // ESP_LITTLEFS_ENABLE_FTRUNCATE
-#if CONFIG_LITTLEFS_USE_MTIME
-        .utime_p     = &vfs_littlefs_utime,
-#endif // CONFIG_LITTLEFS_USE_MTIME
-#endif // CONFIG_VFS_SUPPORT_DIR
-    };
+    const esp_vfs_t vfs = vfs_littlefs_create_struct();
 
     esp_err_t err = esp_littlefs_init(conf);
     if (err != ESP_OK) {
@@ -308,6 +340,26 @@ esp_err_t esp_vfs_littlefs_unregister(const char* partition_label)
     _efs[index] = NULL;
     return ESP_OK;
 }
+
+esp_err_t esp_vfs_littlefs_unregister_partition(const esp_partition_t* partition) {
+    assert(partition);
+    int index;
+    if (esp_littlefs_by_partition(partition, &index) != ESP_OK) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Partition was never registered.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Unregistering \"0x%08"PRIX32"\"", partition->address);
+    esp_err_t err = esp_vfs_unregister(_efs[index]->base_path);
+    if (err != ESP_OK) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Failed to unregister \"0x%08"PRIX32"\"", partition->address);
+        return err;
+    }
+    esp_littlefs_free(&_efs[index]);
+    _efs[index] = NULL;
+    return ESP_OK;
+
+}
+
 
 esp_err_t esp_littlefs_format(const char* partition_label) {
     assert( partition_label );
@@ -430,6 +482,46 @@ static const char * esp_littlefs_errno(enum lfs_error lfs_errno) {
 #define esp_littlefs_errno(x) ""
 #endif
 
+static esp_vfs_t vfs_littlefs_create_struct(void) {
+    return (esp_vfs_t){
+        .flags       = ESP_VFS_FLAG_CONTEXT_PTR,
+        .write_p     = &vfs_littlefs_write,
+        .pwrite_p    = &vfs_littlefs_pwrite,
+        .lseek_p     = &vfs_littlefs_lseek,
+        .read_p      = &vfs_littlefs_read,
+        .pread_p     = &vfs_littlefs_pread,
+        .open_p      = &vfs_littlefs_open,
+        .close_p     = &vfs_littlefs_close,
+        .fsync_p     = &vfs_littlefs_fsync,
+        .fcntl_p     = &vfs_littlefs_fcntl,
+#ifndef CONFIG_LITTLEFS_USE_ONLY_HASH
+        .fstat_p     = &vfs_littlefs_fstat,
+#endif
+#ifdef CONFIG_VFS_SUPPORT_DIR
+        .stat_p      = &vfs_littlefs_stat,
+        .link_p      = NULL, /* Not Supported */
+        .unlink_p    = &vfs_littlefs_unlink,
+        .rename_p    = &vfs_littlefs_rename,
+        .opendir_p   = &vfs_littlefs_opendir,
+        .readdir_p   = &vfs_littlefs_readdir,
+        .readdir_r_p = &vfs_littlefs_readdir_r,
+        .telldir_p   = &vfs_littlefs_telldir,
+        .seekdir_p   = &vfs_littlefs_seekdir,
+        .closedir_p  = &vfs_littlefs_closedir,
+        .mkdir_p     = &vfs_littlefs_mkdir,
+        .rmdir_p     = &vfs_littlefs_rmdir,
+        // access_p
+		.truncate_p  = &vfs_littlefs_truncate,
+#ifdef ESP_LITTLEFS_ENABLE_FTRUNCATE
+        .ftruncate_p = &vfs_littlefs_ftruncate,
+#endif // ESP_LITTLEFS_ENABLE_FTRUNCATE
+#if CONFIG_LITTLEFS_USE_MTIME
+        .utime_p     = &vfs_littlefs_utime,
+#endif // CONFIG_LITTLEFS_USE_MTIME
+#endif // CONFIG_VFS_SUPPORT_DIR
+    };
+}
+
 /**
  * @brief Free and clear a littlefs definition structure.
  * @param efs Pointer to pointer to struct. Done this way so we can also zero
@@ -467,6 +559,30 @@ static void esp_littlefs_dir_free(vfs_littlefs_dir_t *dir){
  * @param[out] index index into _efs
  * @return ESP_OK on success
  */
+
+static esp_err_t esp_littlefs_by_partition(const esp_partition_t* part, int * index){
+    int i;
+    esp_littlefs_t * p;
+
+    if(!part || !index) return ESP_ERR_INVALID_ARG;
+
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Searching for existing filesystem for partition \"0x%08"PRIX32"\"", part->address);
+
+    for (i = 0; i < CONFIG_LITTLEFS_MAX_PARTITIONS; i++) {
+        p = _efs[i];
+        if (p) {
+            if (part->address == p->partition->address) {
+                *index = i;
+                ESP_LOGV(ESP_LITTLEFS_TAG, "Found existing filesystem \"0x%08"PRIX32"\" at index %d", part->address, *index);
+                return ESP_OK;
+            }
+        }
+    }
+
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Existing filesystem \"0x%08"PRIX32"\" not found", part->address);
+    return ESP_ERR_NOT_FOUND;
+}
+
 static esp_err_t esp_littlefs_by_label(const char* label, int * index){
     int i;
     esp_littlefs_t * p;
@@ -528,6 +644,146 @@ static int esp_littlefs_flags_conv(int m) {
     return lfs_flags;
 }
 
+static void esp_littlefs_take_efs_lock(void) {
+    if( _efs_lock == NULL ){
+        static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+        portENTER_CRITICAL(&mux);
+        if( _efs_lock == NULL ){
+            _efs_lock = xSemaphoreCreateMutex();
+            assert(_efs_lock);
+        }
+        portEXIT_CRITICAL(&mux);
+    }
+
+    xSemaphoreTake(_efs_lock, portMAX_DELAY);
+}
+
+static esp_err_t esp_littlefs_init_efs(esp_littlefs_t** efs, const esp_partition_t* partition)
+{
+    /* Allocate Context */
+    *efs = calloc(1, sizeof(esp_littlefs_t));
+    if (efs == NULL) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "esp_littlefs could not be malloced");
+        return ESP_ERR_NO_MEM;
+    }
+    (*efs)->partition = partition;
+
+    { /* LittleFS Configuration */
+        (*efs)->cfg.context = *efs;
+
+        // block device operations
+        (*efs)->cfg.read  = littlefs_api_read;
+        (*efs)->cfg.prog  = littlefs_api_prog;
+        (*efs)->cfg.erase = littlefs_api_erase;
+        (*efs)->cfg.sync  = littlefs_api_sync;
+
+        // block device configuration
+        (*efs)->cfg.read_size = CONFIG_LITTLEFS_READ_SIZE;
+        (*efs)->cfg.prog_size = CONFIG_LITTLEFS_WRITE_SIZE;
+        (*efs)->cfg.block_size = CONFIG_LITTLEFS_BLOCK_SIZE;; 
+        (*efs)->cfg.block_count = (*efs)->partition->size / (*efs)->cfg.block_size;
+        (*efs)->cfg.cache_size = CONFIG_LITTLEFS_CACHE_SIZE;
+        (*efs)->cfg.lookahead_size = CONFIG_LITTLEFS_LOOKAHEAD_SIZE;
+        (*efs)->cfg.block_cycles = CONFIG_LITTLEFS_BLOCK_CYCLES;
+#if CONFIG_LITTLEFS_MULTIVERSION
+#if CONFIG_LITTLEFS_DISK_VERSION_MOST_RECENT
+        (*efs)->cfg.disk_version = 0;
+#elif CONFIG_LITTLEFS_DISK_VERSION_2_1
+        (*efs)->cfg.disk_version = 0x00020001;
+#elif CONFIG_LITTLEFS_DISK_VERSION_2_0
+        (*efs)->cfg.disk_version = 0x00020000;
+#else
+#error "CONFIG_LITTLEFS_MULTIVERSION enabled but no or unknown disk version selected!"
+#endif
+#endif
+    }
+
+    (*efs)->lock = xSemaphoreCreateRecursiveMutex();
+    if ((*efs)->lock == NULL) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "mutex lock could not be created");
+        return ESP_ERR_NO_MEM;
+    }
+
+    (*efs)->fs = calloc(1, sizeof(lfs_t));
+    if ((*efs)->fs == NULL) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "littlefs could not be malloced");
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Initialize and mount littlefs 
+ * @param[in] conf Filesystem Configuration
+ * @return ESP_OK on success
+ */
+static esp_err_t esp_littlefs_init_partition(const esp_vfs_littlefs_conf_partition_t* conf)
+{
+    int index = -1;
+    esp_err_t err = ESP_FAIL;
+    esp_littlefs_t * efs = NULL;
+
+    esp_littlefs_take_efs_lock();
+
+    if (esp_littlefs_get_empty(&index) != ESP_OK) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "max mounted partitions reached");
+        err = ESP_ERR_INVALID_STATE;
+        goto exit;
+    }
+
+    /* Input and Environment Validation */
+    if (esp_littlefs_by_partition(conf->partition, &index) == ESP_OK) {
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Partition already used");
+        err = ESP_ERR_INVALID_STATE;
+        goto exit;
+    }
+
+	{
+        uint32_t flash_page_size = g_rom_flashchip.page_size;
+        uint32_t log_page_size = CONFIG_LITTLEFS_PAGE_SIZE;
+        if (log_page_size % flash_page_size != 0) {
+            ESP_LOGE(ESP_LITTLEFS_TAG, "LITTLEFS_PAGE_SIZE is not multiple of flash chip page size (%u)",
+                    (unsigned int) flash_page_size);
+            err = ESP_ERR_INVALID_ARG;
+            goto exit;
+        }
+    }
+
+    err = esp_littlefs_init_efs(&efs, conf->partition);
+    if(err != ESP_OK) {
+        goto exit;
+    }
+
+    // Mount and Error Check
+    _efs[index] = efs;
+    if(!conf->dont_mount){
+        int res = lfs_mount(efs->fs, &efs->cfg);
+
+        if (res != LFS_ERR_OK) {
+            ESP_LOGE(ESP_LITTLEFS_TAG, "mount failed, %s (%i)", esp_littlefs_errno(res), res);
+            err = ESP_FAIL;
+            goto exit;
+        }
+        efs->cache_size = 4;
+        efs->cache = calloc(sizeof(*efs->cache), efs->cache_size);
+    }
+
+    err = ESP_OK;
+
+exit:
+    if(err != ESP_OK){
+        if( index >= 0 ) {
+            esp_littlefs_free(&_efs[index]);
+        }
+        else{
+            esp_littlefs_free(&efs);
+        }
+    }
+    xSemaphoreGive(_efs_lock);
+    return err;
+}
+
 /**
  * @brief Initialize and mount littlefs 
  * @param[in] conf Filesystem Configuration
@@ -540,17 +796,7 @@ static esp_err_t esp_littlefs_init(const esp_vfs_littlefs_conf_t* conf)
     const esp_partition_t* partition = NULL;
     esp_littlefs_t * efs = NULL;
 
-    if( _efs_lock == NULL ){
-        static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-        portENTER_CRITICAL(&mux);
-        if( _efs_lock == NULL ){
-            _efs_lock = xSemaphoreCreateMutex();
-            assert(_efs_lock);
-        }
-        portEXIT_CRITICAL(&mux);
-    }
-
-    xSemaphoreTake(_efs_lock, portMAX_DELAY);
+    esp_littlefs_take_efs_lock();
 
     if (esp_littlefs_get_empty(&index) != ESP_OK) {
         ESP_LOGE(ESP_LITTLEFS_TAG, "max mounted partitions reached");
@@ -592,56 +838,8 @@ static esp_err_t esp_littlefs_init(const esp_vfs_littlefs_conf_t* conf)
         goto exit;
     }
 
-    /* Allocate Context */
-    efs = calloc(1, sizeof(esp_littlefs_t));
-    if (efs == NULL) {
-        ESP_LOGE(ESP_LITTLEFS_TAG, "esp_littlefs could not be malloced");
-        err = ESP_ERR_NO_MEM;
-        goto exit;
-    }
-    efs->partition = partition;
-
-    { /* LittleFS Configuration */
-        efs->cfg.context = efs;
-
-        // block device operations
-        efs->cfg.read  = littlefs_api_read;
-        efs->cfg.prog  = littlefs_api_prog;
-        efs->cfg.erase = littlefs_api_erase;
-        efs->cfg.sync  = littlefs_api_sync;
-
-        // block device configuration
-        efs->cfg.read_size = CONFIG_LITTLEFS_READ_SIZE;
-        efs->cfg.prog_size = CONFIG_LITTLEFS_WRITE_SIZE;
-        efs->cfg.block_size = CONFIG_LITTLEFS_BLOCK_SIZE;; 
-        efs->cfg.block_count = efs->partition->size / efs->cfg.block_size;
-        efs->cfg.cache_size = CONFIG_LITTLEFS_CACHE_SIZE;
-        efs->cfg.lookahead_size = CONFIG_LITTLEFS_LOOKAHEAD_SIZE;
-        efs->cfg.block_cycles = CONFIG_LITTLEFS_BLOCK_CYCLES;
-#if CONFIG_LITTLEFS_MULTIVERSION
-#if CONFIG_LITTLEFS_DISK_VERSION_MOST_RECENT
-        efs->cfg.disk_version = 0;
-#elif CONFIG_LITTLEFS_DISK_VERSION_2_1
-        efs->cfg.disk_version = 0x00020001;
-#elif CONFIG_LITTLEFS_DISK_VERSION_2_0
-        efs->cfg.disk_version = 0x00020000;
-#else
-#error "CONFIG_LITTLEFS_MULTIVERSION enabled but no or unknown disk version selected!"
-#endif
-#endif
-    }
-
-    efs->lock = xSemaphoreCreateRecursiveMutex();
-    if (efs->lock == NULL) {
-        ESP_LOGE(ESP_LITTLEFS_TAG, "mutex lock could not be created");
-        err = ESP_ERR_NO_MEM;
-        goto exit;
-    }
-
-    efs->fs = calloc(1, sizeof(lfs_t));
-    if (efs->fs == NULL) {
-        ESP_LOGE(ESP_LITTLEFS_TAG, "littlefs could not be malloced");
-        err = ESP_ERR_NO_MEM;
+    err = esp_littlefs_init_efs(&efs, partition);
+    if(err != ESP_OK) {
         goto exit;
     }
 

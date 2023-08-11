@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "esp_idf_version.h"
 #include <stdbool.h>
+#include "esp_partition.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,12 @@ typedef struct {
     uint8_t dont_mount:1;             /**< Don't attempt to mount or format. Overrides format_if_mount_failed */
 } esp_vfs_littlefs_conf_t;
 
+typedef struct {
+    const char *base_path;            /**< Mounting point. */
+    esp_partition_t* partition;       /**< partition to use. */
+    uint8_t dont_mount:1;             /**< Don't attempt to mount. */
+} esp_vfs_littlefs_conf_partition_t;
+
 /**
  * Register and mount littlefs to VFS with given path prefix.
  *
@@ -43,6 +50,22 @@ typedef struct {
  */
 esp_err_t esp_vfs_littlefs_register(const esp_vfs_littlefs_conf_t * conf);
 
+
+/**
+ * Register and mount raw littlefs partition to VFS with given path prefix.
+ *
+ * @param   conf                      Pointer to esp_vfs_littlefs_conf_partition_t configuration structure
+ *
+ * @return  
+ *          - ESP_OK                  if success
+ *          - ESP_ERR_NO_MEM          if objects could not be allocated
+ *          - ESP_ERR_INVALID_STATE   if already mounted or partition is encrypted
+ *          - ESP_ERR_NOT_FOUND       if partition for littlefs was not found
+ *          - ESP_FAIL                if mount or format fails
+ */
+esp_err_t esp_vfs_littlefs_register_partition(const esp_vfs_littlefs_conf_partition_t * conf);
+
+
 /**
  * Unregister and unmount littlefs from VFS
  *
@@ -55,6 +78,18 @@ esp_err_t esp_vfs_littlefs_register(const esp_vfs_littlefs_conf_t * conf);
 esp_err_t esp_vfs_littlefs_unregister(const char* partition_label);
 
 /**
+ * Unregister and unmount littlefs from VFS
+ *
+ * @param partition  partition to unregister.
+ *
+ * @return  
+ *          - ESP_OK if successful
+ *          - ESP_ERR_INVALID_STATE already unregistered
+ */
+esp_err_t esp_vfs_littlefs_unregister_partition(const esp_partition_t* partition);
+
+
+/**
  * Check if littlefs is mounted
  *
  * @param partition_label  Label of the partition to check.
@@ -64,6 +99,17 @@ esp_err_t esp_vfs_littlefs_unregister(const char* partition_label);
  *          - false   if not mounted
  */
 bool esp_littlefs_mounted(const char* partition_label);
+
+/**
+ * Check if littlefs is mounted
+ *
+ * @param partition  partition to check.
+ *
+ * @return  
+ *          - true    if mounted
+ *          - false   if not mounted
+ */
+bool esp_littlefs_partition_mounted(const esp_partition_t* partition);
 
 /**
  * Format the littlefs partition
@@ -87,6 +133,21 @@ esp_err_t esp_littlefs_format(const char* partition_label);
  *          - ESP_ERR_INVALID_STATE   if not mounted
  */
 esp_err_t esp_littlefs_info(const char* partition_label, size_t *total_bytes, size_t *used_bytes);
+
+
+/**
+ * Get information for littlefs
+ *
+ * @param parition                  the partition to get info for.
+ * @param[out] total_bytes          Size of the file system
+ * @param[out] used_bytes           Current used bytes in the file system
+ *
+ * @return  
+ *          - ESP_OK                  if success
+ *          - ESP_ERR_INVALID_STATE   if not mounted
+ */
+esp_err_t esp_littlefs_partition_info(const esp_partition_t* partition, size_t *total_bytes, size_t *used_bytes);
+
 
 #ifdef __cplusplus
 } // extern "C"
