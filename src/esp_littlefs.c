@@ -276,7 +276,7 @@ esp_err_t esp_vfs_littlefs_register_partition(const esp_vfs_littlefs_conf_partit
 
     int index;
     if (esp_littlefs_by_partition(conf->partition, &index) != ESP_OK) {
-        ESP_LOGE(ESP_LITTLEFS_TAG, "Unable to find partition \"0x%08X\"", conf->partition->address);
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Unable to find partition \"0x%08"PRIX32"\"", conf->partition->address);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -348,10 +348,10 @@ esp_err_t esp_vfs_littlefs_unregister_partition(const esp_partition_t* partition
         ESP_LOGE(ESP_LITTLEFS_TAG, "Partition was never registered.");
         return ESP_ERR_INVALID_STATE;
     }
-    ESP_LOGV(ESP_LITTLEFS_TAG, "Unregistering \"0x%08X\"", partition->address);
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Unregistering \"0x%08"PRIX32"\"", partition->address);
     esp_err_t err = esp_vfs_unregister(_efs[index]->base_path);
     if (err != ESP_OK) {
-        ESP_LOGE(ESP_LITTLEFS_TAG, "Failed to unregister \"0x%08X\"", partition->address);
+        ESP_LOGE(ESP_LITTLEFS_TAG, "Failed to unregister \"0x%08"PRIX32"\"", partition->address);
         return err;
     }
     esp_littlefs_free(&_efs[index]);
@@ -566,20 +566,20 @@ static esp_err_t esp_littlefs_by_partition(const esp_partition_t* part, int * in
 
     if(!part || !index) return ESP_ERR_INVALID_ARG;
 
-    ESP_LOGV(ESP_LITTLEFS_TAG, "Searching for existing filesystem for partition \"0x%08X\"", part->address);
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Searching for existing filesystem for partition \"0x%08"PRIX32"\"", part->address);
 
     for (i = 0; i < CONFIG_LITTLEFS_MAX_PARTITIONS; i++) {
         p = _efs[i];
         if (p) {
             if (part->address == p->partition->address) {
                 *index = i;
-                ESP_LOGV(ESP_LITTLEFS_TAG, "Found existing filesystem \"0x%08X\" at index %d", part->address, *index);
+                ESP_LOGV(ESP_LITTLEFS_TAG, "Found existing filesystem \"0x%08"PRIX32"\" at index %d", part->address, *index);
                 return ESP_OK;
             }
         }
     }
 
-    ESP_LOGV(ESP_LITTLEFS_TAG, "Existing filesystem \"0x%08X\" not found", part->address);
+    ESP_LOGV(ESP_LITTLEFS_TAG, "Existing filesystem \"0x%08"PRIX32"\" not found", part->address);
     return ESP_ERR_NOT_FOUND;
 }
 
