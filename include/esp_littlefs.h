@@ -32,7 +32,7 @@ typedef struct {
 
 typedef struct {
     const char *base_path;            /**< Mounting point. */
-    esp_partition_t* partition;       /**< partition to use. */
+    const esp_partition_t* partition;       /**< partition to use. */
     uint8_t dont_mount:1;             /**< Don't attempt to mount. */
 } esp_vfs_littlefs_conf_partition_t;
 

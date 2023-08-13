@@ -240,7 +240,7 @@ esp_err_t esp_littlefs_info(const char* partition_label, size_t *total_bytes, si
     return ESP_OK;
 }
 
-esp_err_t esp_littlefs_parition_info(const esp_partition_t* partition, size_t *total_bytes, size_t *used_bytes){
+esp_err_t esp_littlefs_partition_info(const esp_partition_t* partition, size_t *total_bytes, size_t *used_bytes){
     int index;
     esp_err_t err;
     esp_littlefs_t *efs = NULL;
