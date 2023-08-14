@@ -88,7 +88,7 @@ static ssize_t   vfs_littlefs_pread(void *ctx, int fd, void *dst, size_t size, o
 static int       vfs_littlefs_close(void* ctx, int fd);
 static off_t     vfs_littlefs_lseek(void* ctx, int fd, off_t offset, int mode);
 static int       vfs_littlefs_fsync(void* ctx, int fd);
-static esp_vfs_t vfs_littlefs_create_struct(void);
+static esp_vfs_t vfs_littlefs_create_struct(bool writeable);
 
 #ifdef CONFIG_VFS_SUPPORT_DIR
 static int     vfs_littlefs_stat(void* ctx, const char * path, struct stat * st);
@@ -266,7 +266,7 @@ esp_err_t esp_littlefs_partition_info(const esp_partition_t* partition, size_t *
 esp_err_t esp_vfs_littlefs_register_partition(const esp_vfs_littlefs_conf_partition_t * conf)
 {
     assert(conf->base_path);
-    const esp_vfs_t vfs = vfs_littlefs_create_struct();
+    const esp_vfs_t vfs = vfs_littlefs_create_struct(false);
 
     esp_err_t err = esp_littlefs_init_partition(conf);
     if (err != ESP_OK) {
@@ -296,7 +296,7 @@ esp_err_t esp_vfs_littlefs_register_partition(const esp_vfs_littlefs_conf_partit
 esp_err_t esp_vfs_littlefs_register(const esp_vfs_littlefs_conf_t * conf)
 {
     assert(conf->base_path);
-    const esp_vfs_t vfs = vfs_littlefs_create_struct();
+    const esp_vfs_t vfs = vfs_littlefs_create_struct(true);
 
     esp_err_t err = esp_littlefs_init(conf);
     if (err != ESP_OK) {
@@ -482,9 +482,8 @@ static const char * esp_littlefs_errno(enum lfs_error lfs_errno) {
 #define esp_littlefs_errno(x) ""
 #endif
 
-static esp_vfs_t vfs_littlefs_create_struct(void) {
-    return (esp_vfs_t){
-        .flags       = ESP_VFS_FLAG_CONTEXT_PTR,
+static esp_vfs_t vfs_littlefs_create_struct(bool writeable) {
+    esp_vfs_t vfs = {        .flags       = ESP_VFS_FLAG_CONTEXT_PTR,
         .write_p     = &vfs_littlefs_write,
         .pwrite_p    = &vfs_littlefs_pwrite,
         .lseek_p     = &vfs_littlefs_lseek,
@@ -519,7 +518,18 @@ static esp_vfs_t vfs_littlefs_create_struct(void) {
         .utime_p     = &vfs_littlefs_utime,
 #endif // CONFIG_LITTLEFS_USE_MTIME
 #endif // CONFIG_VFS_SUPPORT_DIR
-    };
+};
+    if(!writeable) {
+        vfs.write_p  = NULL;
+        vfs.pwrite_p = NULL;
+        vfs.fsync_p  = NULL;
+        vfs.link_p   = NULL;
+        vfs.unlink_p = NULL;
+        vfs.rename_p = NULL;
+        vfs.mkdir_p  = NULL;
+        vfs.rmdir_p  = NULL;
+    }
+    return vfs;
 }
 
 /**
