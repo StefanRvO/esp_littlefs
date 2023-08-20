@@ -146,7 +146,7 @@ static int vfs_littlefs_fcntl(void* ctx, int fd, int cmd, int arg);
 static int sem_take(esp_littlefs_t *efs);
 static int sem_give(esp_littlefs_t *efs);
 static esp_err_t format_from_efs(esp_littlefs_t *efs);
-void get_total_and_used_bytes(esp_littlefs_t *efs, size_t *total_bytes, size_t *used_bytes);
+static void get_total_and_used_bytes(esp_littlefs_t *efs, size_t *total_bytes, size_t *used_bytes);
 
 static SemaphoreHandle_t _efs_lock = NULL;
 static esp_littlefs_t * _efs[CONFIG_LITTLEFS_MAX_PARTITIONS] = { 0 };
@@ -282,7 +282,6 @@ bool esp_littlefs_partition_mounted(const esp_partition_t* partition) {
 esp_err_t esp_littlefs_info(const char* partition_label, size_t *total_bytes, size_t *used_bytes){
     int index;
     esp_err_t err;
-    esp_littlefs_t *efs = NULL;
 
     err = esp_littlefs_by_label(partition_label, &index);
     if(err != ESP_OK) return err;
@@ -294,7 +293,6 @@ esp_err_t esp_littlefs_info(const char* partition_label, size_t *total_bytes, si
 esp_err_t esp_littlefs_partition_info(const esp_partition_t* partition, size_t *total_bytes, size_t *used_bytes){
     int index;
     esp_err_t err;
-    esp_littlefs_t *efs = NULL;
 
     err = esp_littlefs_by_partition(partition, &index);
     if(err != ESP_OK) return err;
@@ -766,15 +764,25 @@ static esp_err_t esp_littlefs_init(const esp_vfs_littlefs_conf_t* conf)
             err = ESP_ERR_INVALID_STATE;
             goto exit;
         }
+        partition = esp_partition_find_first(
+                ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
+                conf->partition_label);
+        if (!partition) {
+            ESP_LOGE(ESP_LITTLEFS_TAG, "partition \"%s\" could not be found", conf->partition_label);
+            err = ESP_ERR_NOT_FOUND;
+            goto exit;
+        }
+
     } else if(conf->partition) {
         if (esp_littlefs_by_partition(conf->partition, &index) == ESP_OK) {
             ESP_LOGE(ESP_LITTLEFS_TAG, "Partition already used");
             err = ESP_ERR_INVALID_STATE;
             goto exit;
         }
+        partition = conf->partition;
     } else {
         ESP_LOGE(ESP_LITTLEFS_TAG, "No partition specified in configuration");
-        err = ESP_ERR_INVALID_STATE;
+        err = ESP_ERR_INVALID_ARG;
         goto exit;
     }
 	{
@@ -786,27 +794,6 @@ static esp_err_t esp_littlefs_init(const esp_vfs_littlefs_conf_t* conf)
             err = ESP_ERR_INVALID_ARG;
             goto exit;
         }
-    }
-
-    if ( NULL == conf->partition_label && NULL == conf->partition) {
-        ESP_LOGE(ESP_LITTLEFS_TAG, "Partition label or raw partition must be provided.");
-        err = ESP_ERR_INVALID_ARG;
-        goto exit;
-    }
-
-    if(conf->partition_label)
-    {
-        partition = esp_partition_find_first(
-                ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
-                conf->partition_label);
-        if (!partition) {
-            ESP_LOGE(ESP_LITTLEFS_TAG, "partition \"%s\" could not be found", conf->partition_label);
-            err = ESP_ERR_NOT_FOUND;
-            goto exit;
-        }
-
-    } else {
-        partition = conf->partition;
     }
 
     err = esp_littlefs_init_efs(&efs, partition);
@@ -822,12 +809,7 @@ static esp_err_t esp_littlefs_init(const esp_vfs_littlefs_conf_t* conf)
         if (conf->format_if_mount_failed && res != LFS_ERR_OK) {
             esp_err_t err;
             ESP_LOGW(ESP_LITTLEFS_TAG, "mount failed, %s (%i). formatting...", esp_littlefs_errno(res), res);
-            if(conf->partition_label)
-            {
-                err = esp_littlefs_format(efs->partition->label);
-            } else {
-                err = esp_littlefs_format_partition(efs->partition);
-            }
+            err = esp_littlefs_format_partition(efs->partition);
 
             if(err != ESP_OK) {
                 ESP_LOGE(ESP_LITTLEFS_TAG, "format failed");
